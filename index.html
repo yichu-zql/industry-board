@@ -394,6 +394,39 @@ for (const [k, ind] of Object.entries(D.ind)) {
 }
 const brandCol = (c, b) => COLORS[S.ind][b] || 'var(--s0)';
 
+
+// 所有金额字段与当前数据源绑定；导出和悬浮提示使用相同口径。
+function gmvText(text, amount = ctx().src.amt) {
+  return String(text).replace(/(?:(退前|退后)\s*)?GMV(?!（(?:退前|退后))/g,
+    (_, explicit) => `GMV（${explicit || amount}）`);
+}
+function labelGmvFields(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) if (!['SCRIPT', 'STYLE'].includes(node.parentElement?.tagName)) node.textContent = gmvText(node.textContent);
+}
+function sourceCoverage(srcKey) {
+  const src = D.sources[srcKey];
+  if (!src) return [];
+  return src.plats.map((platform, pi) => {
+    const available = new Set();
+    for (const [key, rows] of Object.entries(D.cube)) if (key.endsWith('|' + srcKey))
+      for (const row of rows) if (row[1] === pi && (row[5] > 0 || row[6] > 0)) available.add(src.months[row[0]]);
+    const months = [...available].sort(), detail = src.coverage?.[platform];
+    return {platform, months, range: detail ? `${detail.first_day} 至 ${detail.last_day}（${detail.days} 个有数日）` :
+      months.length ? `${months[0]} 至 ${months[months.length - 1]}（${months.length} 个有数月）` : '暂无数据'};
+  });
+}
+function sourceNotes(c) {
+  if (c.srcKey !== 'pf') return `<div class="note">金额口径：久谦为 GMV（退后），已扣除退款。数据按商品 × 月汇总。</div>`;
+  const coverage = sourceCoverage('pf').filter(x => c.pIdx.has(c.src.plats.indexOf(x.platform)));
+  return `<div class="note" style="padding:10px 14px;background:var(--surface);border:1px solid var(--line);border-radius:8px">
+    <b>平台后台 · GMV（退前）</b>：天猫来源为生意参谋品牌榜（预估交易金额），抖音来源为罗盘策略品牌榜（测算成交金额），均按品牌 × 日去重后按月汇总。<br>
+    实际有数月份：${coverage.map(x => `${esc(x.platform)} ${esc(x.range)}`).join('；')}。合并可用日期：${esc(c.src.range)}。<br>
+    统计仅覆盖已采集到的数据；首尾月份及中间月份可能缺日，不代表平台完整大盘。未满月按已入库日期累计，不外推整月；抖音不提供真实销量。
+    平台后台与久谦 GMV（退后）存在退款、估算方法、榜单覆盖及类目范围差异，不能直接混用，差额不能直接认定为退款。详见“口径与数据”。</div>`;
+}
+
 function ctx() {
   const ind = D.ind[S.ind], srcKey = S.ind === 'hd' && D.cube['hd|pf'] ? S.src : 'jq', src = D.sources[srcKey], months = src.months;
   let pIdx = new Set(src.plats.map((p, i) => i).filter(i => !S.plats || S.plats.has(src.plats[i])));
@@ -521,7 +554,7 @@ function tbl(id, title, sub, cols, data, o = {}) {
 }
 async function exportTable(id) {
   const t = EXP[id]; if (!t) return;
-  const aoa = [t.header, ...t.rows];
+  const aoa = [t.header.map(h => gmvText(h)), ...t.rows];
   let data, fn = t.name + '.xlsx';
   if (window.XLSX) { const ws = XLSX.utils.aoa_to_sheet(aoa); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, '数据'); data = new Uint8Array(XLSX.write(wb, {bookType: 'xlsx', type: 'array'})); }
   else { fn = t.name + '.csv'; data = '﻿' + aoa.map(r => r.map(v => v == null ? '' : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v).join(',')).join('\n'); }
@@ -535,6 +568,7 @@ async function exportTable(id) {
 /* ================= 4. 图表（SVG） ================= */
 const TT = document.getElementById('tt');
 function showTT(ev, head, rows) {
+  head = gmvText(head); rows = rows.map(row => row.map(value => typeof value === 'string' ? gmvText(value) : value));
   TT.replaceChildren();
   const h = document.createElement('div'); h.className = 'h'; h.textContent = head; TT.append(h);
   for (const [name, val, col] of rows) {
@@ -682,6 +716,8 @@ function render() {
   document.querySelectorAll('#tabs a').forEach(a => { a.setAttribute('aria-current', a.dataset.view === S.view); a.classList.toggle('off', a.dataset.view === 'price' && !c.hasBand); });
   const v = S.view;
   main.innerHTML = v === 'overview' ? vOverview(c) : v === 'price' ? vPrice(c) : v === 'compete' ? vCompete(c) : v === 'brand' ? vBrand(c) : vMethod(c);
+  if (v !== 'method') labelGmvFields(main);
+  main.insertAdjacentHTML('afterbegin', sourceNotes(c));
   renderBar(c);
   requestAnimationFrame(() => (AFTER[v] || (() => {}))(c));
 }
@@ -691,7 +727,7 @@ function renderBar(c) {
   const ind = c.ind;
   document.getElementById('indSeg').innerHTML = Object.entries(D.ind).map(([k, x]) => `<button type="button" data-ind="${k}" aria-pressed="${k === S.ind}">${x.name}</button>`).join('');
   const sg = document.getElementById('srcSeg'); sg.hidden = S.ind !== 'hd' || !D.cube['hd|pf'];
-  sg.innerHTML = ['jq', 'pf'].filter(k => D.sources[k]).map(k => `<button type="button" data-src="${k}" aria-pressed="${k === c.srcKey}">${D.sources[k].name}<small>${D.sources[k].plats.length === 3 ? '天猫·京东·抖音' : '天猫·抖音'}</small></button>`).join('');
+  sg.innerHTML = ['jq', 'pf'].filter(k => D.sources[k]).map(k => `<button type="button" data-src="${k}" aria-pressed="${k === c.srcKey}">${D.sources[k].name}（${D.sources[k].amt}）<small>${D.sources[k].plats.length === 3 ? '天猫·京东·抖音' : '天猫·抖音'}</small></button>`).join('');
   const es = document.getElementById('endSel');
   es.innerHTML = c.months.map((m, i) => `<option value="${m}" ${i === c.endIdx ? 'selected' : ''}>${m}${c.src.partial[m] ? `（至${c.src.partial[m][0]}日）` : ''}</option>`).reverse().join('');
   document.getElementById('modeSeg').innerHTML = MODES.map(([k, n]) => `<button type="button" data-mode="${k}" aria-pressed="${k === S.mode}">${n}</button>`).join('');
@@ -718,7 +754,7 @@ function renderBar(c) {
   const who = S.view === 'brand' && S.brand ? `<span class="who"><span class="dot" style="background:${brandCol(c, c.ind.brands.indexOf(S.brand))}"></span>当前品牌 ${esc(S.brand)} · 对比 ${S.cmp === '__ind' ? '行业整体' : esc(S.cmp)}</span>` : '';
   document.getElementById('range').innerHTML = who + `<span>数据源 <span class="src">${src.name}</span>（${src.grain}，${src.amt} GMV）</span><span>可用日期 <b>${src.range}</b></span><span>入库 ${src.loaded} · 看板生成 ${D.meta.built}</span><span>当前统计 <b>${P.label}</b>${P.prev ? ` 对比 ${P.prev.label}` : '（无上年同期）'}</span>`;
   const demo = document.getElementById('demo'); demo.hidden = !D.meta.demo;
-  demo.innerHTML = '<b>Demo：</b>所有数字均为模拟数据，只用于确认页面结构和交互。吹风机商品标题和系列名取自人工系列清单；平台后台为退前 GMV，与久谦退后 GMV 不能直接比较。';
+  demo.innerHTML = '<b>Demo：</b>所有数字均为模拟数据，只用于确认页面结构和交互。吹风机商品标题和系列名取自人工系列清单；平台后台为GMV（退前），与久谦GMV（退后） 不能直接比较。';
 }
 
 /* ---------- 行业大盘 ---------- */
@@ -782,7 +818,7 @@ function vOverview(c) {
   const platT = structTable('t_plat', '平台结构', r => r[1], c.src.plats, i => PLAT_COL[c.src.plats[i]]);
   const subT = c.ind.subs.length > 1 ? structTable('t_sub', '细分品类结构', r => r[2], c.ind.subs, i => `var(--s${i + 1})`) : '';
   const segOf = (label, key, opts) => `<div class="seg" role="group" aria-label="${label}">${opts.map(([k, n]) => `<button type="button" data-set="${key}" data-val="${k}" aria-pressed="${S[key] === k}">${n}</button>`).join('')}</div>`;
-  const trendSeg = segOf('时间粒度', 'gran', [['m', '月度'], ['q', '季度'], ['y', '年度']]) + segOf('指标', 'trendVal', [['gmv', '销售额'], ['share', '销售额占比']])
+  const trendSeg = segOf('时间粒度', 'gran', [['m', '月度'], ['q', '季度'], ['y', '年度']]) + segOf('指标', 'trendVal', [['gmv', gmvText('GMV')], ['share', gmvText('GMV 占比')]])
     + (c.ind.subs.length > 1 ? segOf('堆叠方式', 'trendBy', [['plat', '按平台'], ['sub', '按细分品类']]) : '');
   const granTxt = {m: '近 36 个月', q: '近 12 个季度', y: '各年'}[S.gran];
   return concl(s) + `<div class="kpis">${kpis}</div>
@@ -863,7 +899,7 @@ function vPrice(c) {
     const unit = {share: '(%)', gmv: '(元)', qty: '(件)'}[hv];
     EXP.t_heat = {name: `${c.ind.name}_价格带品牌${{share: '份额', gmv: '销售额', qty: '销量'}[hv]}_${P.label}`, header: ['品牌', ...B.names.map(n => n + unit)], rows: show.map(b => [bname(c, b), ...B.names.map(n => { const v = cell(n, b); return hv === 'share' ? p2(v) : Math.round(v); })])};
     const sub = {share: '每列是该价位内的市占率', gmv: '各品牌在每个价位的 GMV', qty: '各品牌在每个价位的销量'}[hv];
-    const tg = `<div class="seg" role="group" aria-label="矩阵指标">${[['share', '市占率'], ['gmv', '销售额'], ['qty', '销量']].map(([k, n]) => `<button type="button" data-set="heatVal" data-val="${k}" aria-pressed="${hv === k}">${n}</button>`).join('')}</div>`;
+    const tg = `<div class="seg" role="group" aria-label="矩阵指标">${[['share', '市占率'], ['gmv', gmvText('GMV')], ['qty', '销量']].map(([k, n]) => `<button type="button" data-set="heatVal" data-val="${k}" aria-pressed="${hv === k}">${n}</button>`).join('')}</div>`;
     return `<div class="card"><div class="ct">各价格带里的品牌${{share: '份额', gmv: '销售额', qty: '销量'}[hv]}<span class="cs">${P.label}，${sub}，颜色越深数值越高</span>${tg}<button class="xbtn" type="button" data-x="t_heat">导出 Excel</button></div><div class="tw"><table class="heat"><thead>${head}</thead><tbody>${tb}</tbody></table></div></div>`;
   })();
   return concl(s) + `<div class="ctl">${seg}</div>
@@ -1107,11 +1143,20 @@ function vMethod(c) {
     hl: '按商品标题关键词打标（沿用 CASE 规则，按顺序判断，先命中先生效）：生发仪、生发梳、头皮上药器、米诺地尔药剂、防脱洗发水、防脱精华。医用药品数据库里没有，不接入，所以「米诺地尔药剂」只含非药品类目的商品。',
     oil: '与防脱固发同一次打标：控油洗发水、控油精华、免洗清洁。防脱类规则在前，一个商品只归一个细分品类。',
   }[S.ind];
-  const srcRows = [['久谦', jq.plats.join('、'), jq.table, jq.grain, jq.range, '退后 GMV（gmv 字段）；每次整段重拉，吃进久谦对历史月份的退款回刷', '全部页面']];
-  if (S.ind === 'hd' && pf) srcRows.push(['平台后台', pf.plats.join('、'), pf.table, pf.grain, pf.range, '退前 GMV（含之后退款的订单），与久谦退后 GMV 不能直接比', '行业大盘、竞品格局（品牌）、品牌深挖；价格带、系列、商品不展示']);
+  const srcRows = [['久谦', jq.plats.join('、'), jq.table, jq.grain, jq.range, 'GMV（退后）（gmv 字段）；默认重拉最近 3 个月，历史月份使用缓存；全量刷新时重拉历史数据', '全部页面']];
+  if (S.ind === 'hd' && pf) srcRows.push(['平台后台', pf.plats.join('、'), pf.table, pf.grain, pf.range, 'GMV（退前）（含之后退款的订单），与久谦GMV（退后） 不能直接比', '行业大盘、竞品格局（品牌）、品牌深挖；价格带、系列、商品不展示']);
   const srcT = `<div class="card"><div class="ct">数据源与可用日期</div><div class="tw"><table><thead><tr><th class="l">数据源</th><th class="l">平台</th><th class="l">表</th><th class="l">粒度</th><th class="l">可用日期</th><th class="l">金额口径</th><th class="l">能看的页面</th></tr></thead><tbody>${srcRows.map(r => `<tr>${r.map(x => `<td class="l" style="white-space:normal;min-width:90px">${esc(x)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>`;
+
+  const coverageRows = pf ? sourceCoverage('pf') : [];
+  const pfNotes = pf ? `<div class="card"><div class="ct">平台后台来源、实际覆盖与金额口径</div>
+    <p>平台后台均为 <b>GMV（退前）</b>；久谦为 <b>GMV（退后）</b>。两者不能互相替代，差异也不能直接解释为退款。</p>
+    <div class="tw"><table><thead><tr><th class="l">平台</th><th class="l">数据来源</th><th class="l">金额字段</th><th class="l">实际有数范围</th></tr></thead><tbody>
+    ${coverageRows.map(x => `<tr><td class="l">${esc(x.platform)}</td><td class="l">${x.platform === '天猫' ? '生意参谋品牌榜' : '罗盘策略品牌榜'}</td><td class="l">${x.platform === '天猫' ? '预估交易金额 · GMV（退前）' : '测算成交金额 · GMV（退前）'}</td><td class="l">${esc(x.range)}</td></tr>`).join('')}</tbody></table></div>
+    <p class="note">合并可用日期：${esc(pf.range)}。有数月份：${coverageRows.map(x => `${esc(x.platform)} ${x.months.join('、')}`).join('；')}。未列月份无已采集数据，不能视为真实交易额为零。历史缓存仅能确认月级覆盖，尚不能逐平台确认精确起止日；后续取数会补充逐平台有数日期与天数。</p>
+    <p class="note">统计按当前筛选时段累计已入库金额；月中截止按实际截止日展示，不外推整月。年累计和近 12 个月如超出来源覆盖范围，仅累计已有数据。天猫按日期 × 类目 × 品牌取最大值去重；行业占比可用时推算榜单外金额。抖音同维度取最大值去重，只累计已采集榜单品牌，不提供真实销量；覆盖天数及榜单范围可能不足，不能视为完整大盘。</p></div>` : '';
+
   const bandsT = `<div class="card"><div class="ct">价格带档位<span class="cs">一律按久谦原始件均价划分，不做价格校正；每个行业一套</span></div><div class="tw"><table><thead><tr><th class="l">行业</th><th class="l">档位（元）</th><th class="l">汇总视图</th></tr></thead><tbody>${Object.values(D.ind).map(x => `<tr><td class="l">${x.name}</td><td class="l" style="white-space:normal">${x.bands.join('、')}</td><td class="l">${x.band3 ? Object.keys(x.band3).join(' / ') : '—'}</td></tr>`).join('')}</tbody></table></div></div>`;
-  const checks = D.checks || [['行业月表对数', 'ok', '吹风机 2025 年各平台 GMV 与原 Excel 偏差 < 1%'], ['月度波动', 'ok', '各行业环比都在 ±60% 以内，没有平台为 0'], ['系列覆盖', 'warn', '吹风机未归类链接占 GMV 6.8%（目标 ≤ 5%），复核清单见下表'], ['平台后台接入', 'na', '金额为退前 GMV；类目字段和品牌覆盖范围待字段核对后确认（Demo 为模拟）']];
+  const checks = D.checks || [['行业月表对数', 'ok', '吹风机 2025 年各平台 GMV 与原 Excel 偏差 < 1%'], ['月度波动', 'ok', '各行业环比都在 ±60% 以内，没有平台为 0'], ['系列覆盖', 'warn', '吹风机未归类链接占 GMV 6.8%（目标 ≤ 5%），复核清单见下表'], ['平台后台接入', 'na', '金额为GMV（退前）；类目字段和品牌覆盖范围待字段核对后确认（Demo 为模拟）']];
   const tagOf = s => s === 'ok' ? '<span class="tag ok">通过</span>' : s === 'warn' ? '<span class="tag warn">需处理</span>' : '<span class="tag na">待确认</span>';
   const review = D.review || [
     ['天猫', '徕芬', '徕芬吹风机家用负离子护发速干', '¥222', 'SE Lite', '标题无型号，按价位和店铺判断', '待确认'],
@@ -1124,14 +1169,14 @@ function vMethod(c) {
   EXP.t_review = {name: '吹风机_系列复核清单', header: ['平台', '品牌', '商品标题', '件均价', '规则结果', '说明', '状态'], rows: review};
   const steps = `<ol>
     <li>Windows 任务计划每天 17:30 自动运行 <code>更新看板.bat</code>：先查久谦和平台后台的最新入库时间，和上次比没有变化就直接退出；也可以随时手动双击。</li>
-    <li>脚本只对 <code>spider</code>、<code>diantoushi</code> 执行 SELECT，整段重拉 2023 年至今；中间结果写进 <code>ulike_tmp.mkt_</code> 开头的表。</li>
+    <li>脚本只对 <code>spider</code>、<code>diantoushi</code> 执行 SELECT，默认重拉最近 3 个月并使用历史缓存；中间结果写进 <code>ulike_tmp.mkt_</code> 开头的表。</li>
     <li>按系列词典给吹风机新链接归类，新出现的未归类链接写进「系列复核清单.xlsx」，在 WPS 里改完保存，下次运行自动生效。</li>
     <li>生成 <code>行业竞品看板.html</code>（单文件，双击打开，可直接发给同事）。整个过程不需要 Claude，不消耗 token。</li>
-    <li>需要更新这个在线链接时，在对话里说一句「发布看板」即可。</li></ol>`;
-  return `<div class="method"><section class="mod"><div class="stack">${srcT}
+    <li>本机每日 17:30 更新成功后同步至 GitHub Pages；电脑需开机、登录并联网，线上保留最后成功发布版本。</li></ol>`;
+  return `<div class="method"><section class="mod"><div class="stack">${srcT}${pfNotes}
     <div class="card"><h3>${ind.name}的取数范围与指标</h3><dl>
       <dt>行业范围</dt><dd>${scope}</dd>
-      <dt>GMV</dt><dd>久谦 <code>jq_sale_item_m.gmv</code>，即退后 GMV；吹风机平台后台为退前 GMV。</dd>
+      <dt>GMV</dt><dd>久谦 <code>jq_sale_item_m.gmv</code>，即GMV（退后）；吹风机平台后台为GMV（退前）。</dd>
       <dt>件均价</dt><dd>GMV ÷ 销量，先汇总再相除。</dd>
       <dt>同比</dt><dd>只和上一年的相同月份比；上一年没有数据显示「—」。平台后台当月未满时，上年同月按相同天数折算。</dd>
       <dt>市占率</dt><dd>品牌（系列、商品）GMV ÷ 当前筛选下的行业合计；合计包含未识别品牌。</dd>
@@ -1154,8 +1199,8 @@ function twoSource() {   // 两个数据源同口径（天猫 + 抖音）对照�
   for (const r of D.cube['hd|jq']) if (r[0] === ji && r[1] !== 1) a.set(r[3], (a.get(r[3]) || 0) + r[5]);
   for (const r of D.cube['hd|pf']) if (r[0] === pi) b.set(r[3], (b.get(r[3]) || 0) + r[5]);
   const rows = ind.focus.map(n => ind.brands.indexOf(n)).map(x => ({n: ind.brands[x], a: a.get(x) || 0, b: b.get(x) || 0}));
-  EXP.t_two = {name: '吹风机_两个数据源对照_' + m, header: ['品牌', '久谦（天猫+抖音）', '平台后台（天猫+抖音）', '差异(%)'], rows: rows.map(r => [r.n, Math.round(r.a), Math.round(r.b), p2(yoy(r.b, r.a))])};
-  return `<div class="card"><div class="ct">两个数据源对照<span class="cs">${m}，只比天猫 + 抖音；差异 = 平台后台 ÷ 久谦 − 1</span><button class="xbtn" type="button" data-x="t_two">导出 Excel</button></div><div class="tw"><table><thead><tr><th class="l">品牌</th><th>久谦</th><th>平台后台</th><th>差异</th></tr></thead><tbody>${rows.map(r => `<tr><td class="l"><span class="dot" style="background:var(--s${BRAND_COL[r.n]})"></span>${r.n}</td><td class="n">${money(r.a)}</td><td class="n">${money(r.b)}</td><td class="n">${dtext(yoy(r.b, r.a))}</td></tr>`).join('')}</tbody></table></div><div class="note">平台后台是退前 GMV，久谦是退后 GMV，差额里主要是退款，另有类目定义的差异；数字不能互相替代，看板切换数据源时整页一起换，不混用。</div></div>`;
+  EXP.t_two = {name: '吹风机_两个数据源对照_' + m, header: ['品牌', '久谦 GMV（退后，天猫+抖音）', '平台后台 GMV（退前，天猫+抖音）', '差异(%)'], rows: rows.map(r => [r.n, Math.round(r.a), Math.round(r.b), p2(yoy(r.b, r.a))])};
+  return `<div class="card"><div class="ct">两个数据源对照<span class="cs">${m}，只比天猫 + 抖音；差异 = 平台后台 ÷ 久谦 − 1</span><button class="xbtn" type="button" data-x="t_two">导出 Excel</button></div><div class="tw"><table><thead><tr><th class="l">品牌</th><th>久谦 GMV（退后）</th><th>平台后台 GMV（退前）</th><th>差异</th></tr></thead><tbody>${rows.map(r => `<tr><td class="l"><span class="dot" style="background:var(--s${BRAND_COL[r.n]})"></span>${r.n}</td><td class="n">${money(r.a)}</td><td class="n">${money(r.b)}</td><td class="n">${dtext(yoy(r.b, r.a))}</td></tr>`).join('')}</tbody></table></div><div class="note">平台后台是GMV（退前），久谦是GMV（退后），差异包含退款、估算方法、榜单覆盖和类目范围，不能直接认定为退款；数字不能互相替代，看板切换数据源时整页一起换，不混用。</div></div>`;
 }
 
 /* ================= 7. 交互 ================= */
